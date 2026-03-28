@@ -1,32 +1,34 @@
-import { Pool } from '@neondatabase/serverless';
-import { QueryResult } from 'pg';
+import { PrismaClient } from '@prisma/client';
+import { Pool } from 'pg';
+import { PrismaPg } from '@prisma/adapter-pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
-if (!process.env.DATABASE_URL) {
-  console.error('Error: DATABASE_URL environment variable is missing in backend/.env');
-  process.exit(1);
-}
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: true,
-});
 
-export const db = {
-  query: async <T extends import('pg').QueryResultRow = any>(
-    text: string, 
-    params?: any[]
-  ): Promise<QueryResult<T>> => {
-    const client = await pool.connect();
-    
-    try {
-      const result = await client.query<T>(text, params);
-      return result;
-    } catch (error) {
-      console.error('Database query error:', error);
-      throw error;
-    } finally {
-      client.release();
-    }
-  },
+const connectionString = process.env.DATABASE_URL!;
+const pool = new Pool({ connectionString });
+
+const adapter = new PrismaPg(pool as any);
+
+declare global {
+  var prisma: PrismaClient | undefined;
+}
+
+export const db = global.prisma || new PrismaClient({ adapter });
+
+if (process.env.NODE_ENV !== 'production') global.prisma = db;
+export const getTenantDB = (tenantId: string): PrismaClient => {
+  return db.$extends({
+    query: {
+      $allModels: {
+        async $allOperations({ args, query }) {
+          const [, result] = await db.$transaction([
+            db.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, TRUE)`,
+            query(args),
+          ]);
+          return result;
+        },
+      },
+    },
+  }) as unknown as PrismaClient;
 };

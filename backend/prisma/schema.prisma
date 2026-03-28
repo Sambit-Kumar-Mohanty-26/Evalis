@@ -1,0 +1,355 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ENUM DEFINITIONS
+
+enum UserRole {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+//AISHE DIRECTORY (Global - no tenant_id)
+
+model AisheDirectory {
+  aisheCode           String   @id @map("aishe_code") @db.VarChar(50)
+  institutionName     String   @map("institution_name") @db.VarChar(255)
+  institutionType     String?  @map("institution_type") @db.VarChar(100)
+  state               String?  @db.VarChar(100)
+  district            String?  @db.VarChar(100)
+  managementType      String?  @map("management_type") @db.VarChar(100)
+  locationType        String?  @map("location_type") @db.VarChar(50)
+  establishedYear     Int?     @map("established_year")
+  universityAisheCode String?  @map("university_aishe_code") @db.VarChar(50)
+  createdAt           DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  tenants Tenant[]
+
+  @@index([state, district])
+  @@map("aishe_directory")
+}
+
+//USERS TABLE (with Enum + Soft Delete + Verification)
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  fullName     String   @map("full_name") @db.VarChar(255)
+  email        String   @unique @db.VarChar(255)
+  phone        String?  @db.VarChar(20)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         UserRole @default(ADMIN)
+  tenantId     String?  @map("tenant_id") @db.Uuid
+  isVerified   Boolean  @default(false) @map("is_verified")
+  isDeleted    Boolean  @default(false) @map("is_deleted")
+  deletedAt    DateTime? @map("deleted_at") @db.Timestamptz()
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  // Relations
+  tenant             Tenant?                    @relation("TenantUsers", fields: [tenantId], references: [id], onDelete: Cascade)
+  managedTenant      Tenant?                    @relation("TenantAdmin")
+  refreshTokens      RefreshToken[]
+  teacherAssignments TeacherSubjectAssignment[]
+  enrollments        StudentEnrollment[]
+  studentMarks       Mark[]                     @relation("StudentMarks")
+  enteredMarks       Mark[]                     @relation("MarksEnteredBy")
+
+  @@index([tenantId])
+  @@index([role])
+  @@map("users")
+}
+
+//TENANTS TABLE (Multi-Tenant Isolation)
+
+model Tenant {
+  id                    String   @id @default(uuid()) @db.Uuid
+  adminUserId           String?  @unique @map("admin_user_id") @db.Uuid
+  aisheCode             String?  @map("aishe_code") @db.VarChar(50)
+  customInstitutionName String?  @map("custom_institution_name") @db.VarChar(255)
+  isVerified            Boolean  @default(false) @map("is_verified")
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  // Relations
+  adminUser        User?             @relation("TenantAdmin", fields: [adminUserId], references: [id], onDelete: Restrict)
+  aishe            AisheDirectory?   @relation(fields: [aisheCode], references: [aisheCode], onDelete: SetNull)
+  users            User[]            @relation("TenantUsers")
+  academicVersions AcademicVersion[]
+  batches          Batch[]
+  exams            Exam[]
+
+  @@map("tenants")
+}
+
+// APPEND-ONLY OTP TABLE (Pre-tenant - no tenant_id)
+
+model OtpVerification {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @db.VarChar(255)
+  otpHash      String   @map("otp_hash") @db.VarChar(255)
+  attemptCount Int      @default(0) @map("attempt_count")
+  isUsed       Boolean  @default(false) @map("is_used")
+  lastSentAt   DateTime @default(now()) @map("last_sent_at") @db.Timestamptz()
+  expiresAt    DateTime @map("expires_at") @db.Timestamptz()
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([email])
+  @@map("otp_verifications")
+}
+
+// REFRESH TOKENS (Session & Device Tracking - tenant_id added)
+
+model RefreshToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  tenantId  String?  @map("tenant_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash") @db.VarChar(255)
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  userAgent String?  @map("user_agent")
+  revoked   Boolean  @default(false)
+  expiresAt DateTime @map("expires_at") @db.Timestamptz()
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+//IDEMPOTENCY KEYS (Double-click protection — tenant_id added)
+
+model IdempotencyKey {
+  key              String   @id @db.Uuid
+  email            String?  @db.VarChar(255)
+  tenantId         String?  @map("tenant_id") @db.Uuid
+  requestHash      String?  @map("request_hash") @db.VarChar(255)
+  responseSnapshot Json?    @map("response_snapshot")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@map("idempotency_keys")
+}
+
+// ACADEMIC HIERARCHY (Dynamic Curriculum)
+
+model AcademicVersion {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  name      String   @db.VarChar(100) // e.g., "Syllabus 2024-2025"
+  isCurrent Boolean  @default(true) @map("is_current")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  programs Program[]
+  batches  Batch[]
+
+  @@index([tenantId])
+  @@map("academic_versions")
+}
+
+model Program {
+  id            String   @id @default(uuid()) @db.Uuid
+  versionId     String   @map("version_id") @db.Uuid
+  name          String   @db.VarChar(100) // e.g., "B.Tech"
+  durationYears Int      @map("duration_years")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  version  AcademicVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  branches Branch[]
+
+  @@map("programs")
+}
+
+model Branch {
+  id        String   @id @default(uuid()) @db.Uuid
+  programId String   @map("program_id") @db.Uuid
+  name      String   @db.VarChar(100) // e.g., "Computer Science"
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  program   Program    @relation(fields: [programId], references: [id], onDelete: Cascade)
+  semesters Semester[]
+  batches   Batch[]
+
+  @@map("branches")
+}
+
+model Semester {
+  id             String   @id @default(uuid()) @db.Uuid
+  branchId       String   @map("branch_id") @db.Uuid
+  semesterNumber Int      @map("semester_number") // 1, 2, 3...
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  branch   Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  subjects Subject[]
+  exams    Exam[]
+
+  @@map("semesters")
+}
+
+model Subject {
+  id          String   @id @default(uuid()) @db.Uuid
+  semesterId  String   @map("semester_id") @db.Uuid
+  name        String   @db.VarChar(255)
+  code        String   @db.VarChar(50)
+  creditHours Int      @map("credit_hours")
+  maxMarks    Int      @default(100) @map("max_marks")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  semester           Semester                   @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+  teacherAssignments TeacherSubjectAssignment[]
+  marks              Mark[]
+
+  @@map("subjects")
+}
+
+// STUDENT & BATCH MANAGEMENT
+
+model Batch {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  branchId  String   @map("branch_id") @db.Uuid
+  versionId String   @map("version_id") @db.Uuid // Links batch to specific academic version
+  name      String   @db.VarChar(100)             // e.g., "2024-2028 Section A"
+  startYear Int      @map("start_year")
+  endYear   Int      @map("end_year")
+  section   String?  @db.VarChar(10)              // A, B, C...
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  tenant             Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch             Branch                     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  version            AcademicVersion            @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  enrollments        StudentEnrollment[]
+  teacherAssignments TeacherSubjectAssignment[]
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@map("batches")
+}
+
+model StudentEnrollment {
+  id              String   @id @default(uuid()) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  batchId         String   @map("batch_id") @db.Uuid
+  rollNumber      String   @map("roll_number") @db.VarChar(50)
+  currentSemester Int      @default(1) @map("current_semester")
+  status          String   @default("active") @db.VarChar(20) // active, graduated, dropped
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, rollNumber])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([batchId])
+  @@map("student_enrollments")
+}
+
+// TEACHER ASSIGNMENT
+
+model TeacherSubjectAssignment {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  subjectId String   @map("subject_id") @db.Uuid
+  batchId   String?  @map("batch_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  batch   Batch?  @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, subjectId, batchId])
+  @@index([tenantId])
+  @@index([userId])
+  @@map("teacher_subject_assignments")
+}
+
+// EXAM & MARKS
+
+model Exam {
+  id         String    @id @default(uuid()) @db.Uuid
+  tenantId   String    @map("tenant_id") @db.Uuid
+  semesterId String    @map("semester_id") @db.Uuid
+  name       String    @db.VarChar(100) // "Mid Semester 1", "End Semester"
+  examType   String    @map("exam_type") @db.VarChar(50) // mid_sem, end_sem, internal, practical
+  maxMarks   Int       @map("max_marks")
+  weightage  Decimal   @db.Decimal(5, 2) // e.g., 30.00 (percent)
+  examDate   DateTime? @map("exam_date") @db.Date
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  semester Semester @relation(fields: [semesterId], references: [id], onDelete: Cascade)
+  marks    Mark[]
+
+  @@index([tenantId])
+  @@index([semesterId])
+  @@map("exams")
+}
+
+model Mark {
+  id            String   @id @default(uuid()) @db.Uuid
+  tenantId      String   @map("tenant_id") @db.Uuid
+  examId        String   @map("exam_id") @db.Uuid
+  subjectId     String   @map("subject_id") @db.Uuid
+  studentId     String   @map("student_id") @db.Uuid
+  marksObtained Decimal  @map("marks_obtained") @db.Decimal(6, 2)
+  isAbsent      Boolean  @default(false) @map("is_absent")
+  enteredBy     String   @map("entered_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  exam    Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  student User    @relation("StudentMarks", fields: [studentId], references: [id])
+  teacher User    @relation("MarksEnteredBy", fields: [enteredBy], references: [id])
+
+  // Constraint: One mark entry per student per subject per exam
+  @@unique([examId, subjectId, studentId])
+  @@index([tenantId])
+  @@index([studentId])
+  @@index([subjectId])
+  @@map("marks")
+}
+
+// PERFORMANCE & ANALYTICS
+
+model PerformanceSnapshot {
+  id           String   @id @default(uuid()) @db.Uuid
+  tenantId     String   @map("tenant_id") @db.Uuid
+  studentId    String   @map("student_id") @db.Uuid
+  semesterId   String?  @map("semester_id") @db.Uuid
+  semesterGpa  Decimal? @map("semester_gpa") @db.Decimal(4, 2)
+  cgpa         Decimal  @db.Decimal(4, 2)
+  totalCredits Int      @map("total_credits")
+  rank         Int?
+  percentage   Decimal? @db.Decimal(5, 2)
+  calculatedAt DateTime @default(now()) @map("calculated_at") @db.Timestamptz()
+
+  @@index([tenantId, studentId])
+  @@index([tenantId, semesterId])
+  @@map("performance_snapshots")
+}
+
+// AUDIT LOGS (Compliance & Debugging)
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @map("tenant_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  action    String   @db.VarChar(50)  // CREATE, UPDATE, DELETE, LOGIN, LOGOUT
+  entity    String   @db.VarChar(50)  // user, mark, exam, batch, etc.
+  entityId  String?  @map("entity_id") @db.Uuid
+  metadata  Json?                     // Additional context (old/new values, etc.)
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
